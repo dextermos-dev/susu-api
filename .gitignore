@@ -23,6 +23,3 @@ pnpm-debug.log*
 .idea/
 .vscode/*
 !.vscode/extensions.json
-branch_structure.json
-temp_auto_push.bat
-temp_interactive_push.bat
