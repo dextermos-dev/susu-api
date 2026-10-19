@@ -54,6 +54,9 @@ export const envSchema = z.object({
   USDC_CONTRACT_ID: contractIdSchema,
   TREASURY_ADDRESS: accountIdSchema,
 
+  // Deadline for Soroban RPC simulation calls in milliseconds.
+  SOROBAN_SIMULATE_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+
   // Must match the contract. Enforced below.
   PROTOCOL_FEE_BPS: z.coerce.number().int().positive(),
 

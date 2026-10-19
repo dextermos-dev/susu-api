@@ -320,6 +320,46 @@ describe('prepareInvocation', () => {
 
     expect(outcome).toEqual({ status: 'unrecognized', contractId: GROUP, method: 'contribute' });
   });
+
+  it('maps a simulation exceeding the configured deadline to upstream_failed with timeout reason', async () => {
+    // A simulator that never resolves, testing the timeout boundary
+    const simulate = vi.fn(() => new Promise<rpc.Api.SimulateTransactionResponse>(() => {}));
+
+    const outcome = await prepareInvocation({
+      envelopeXdr: buildEnvelope({}),
+      networkPassphrase: PASSPHRASE,
+      simulate,
+      isAllowedContract: ALLOWED,
+      simulateTimeoutMs: 25,
+    });
+
+    expect(outcome).toEqual({
+      status: 'upstream_failed',
+      reason: 'timeout',
+      contractId: GROUP,
+      method: 'contribute',
+    });
+  });
+
+  it('maps simulator transport rejections to upstream_failed with transport reason', async () => {
+    const simulate = vi.fn(async () => {
+      throw new Error('connection reset by peer');
+    });
+
+    const outcome = await prepareInvocation({
+      envelopeXdr: buildEnvelope({}),
+      networkPassphrase: PASSPHRASE,
+      simulate,
+      isAllowedContract: ALLOWED,
+    });
+
+    expect(outcome).toEqual({
+      status: 'upstream_failed',
+      reason: 'transport',
+      contractId: GROUP,
+      method: 'contribute',
+    });
+  });
 });
 
 describe('keepsInvocation', () => {

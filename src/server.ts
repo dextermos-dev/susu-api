@@ -54,6 +54,7 @@ export type BuildServerOptions = {
   notificationReadModel?: NotificationReadModel;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
+  simulateTimeoutMs?: number;
   trustProxy?: FastifyServerOptions['trustProxy'];
   rateLimitMax?: number;
 };
@@ -232,6 +233,8 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     readModel: options.notificationReadModel ?? createNotificationReadModel(getDb()),
   });
 
+  const simulateTimeoutMs = options.simulateTimeoutMs ?? env.SOROBAN_SIMULATE_TIMEOUT_MS;
+
   // Public reads, plus the one authenticated preparation route: a transaction's
   // events are on the ledger already, but simulating an envelope spends this
   // service's RPC quota, so that one requires a session.
@@ -239,7 +242,10 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     prefix: '/api/v1',
     requireAuth,
     readModel: options.transactionReadModel ?? createTransactionReadModel(getDb()),
-    simulate: options.sorobanSimulator ?? createSorobanSimulator(env.STELLAR_RPC_URL),
+    simulate:
+      options.sorobanSimulator ??
+      createSorobanSimulator(env.STELLAR_RPC_URL, { timeoutMs: simulateTimeoutMs }),
+    simulateTimeoutMs,
     networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
     // The Factory, or a group the index has actually seen. Registrations are
     // deliberately not honoured here: they are unverified claims, and letting

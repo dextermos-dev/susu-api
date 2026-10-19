@@ -32,6 +32,7 @@ export type TransactionRoutesOptions = {
   simulate: SorobanSimulator;
   isAllowedContract: (contractId: string) => Promise<boolean>;
   networkPassphrase: string;
+  simulateTimeoutMs?: number;
 };
 
 /**
@@ -171,6 +172,7 @@ export async function transactionRoutes(
         networkPassphrase,
         simulate,
         isAllowedContract,
+        simulateTimeoutMs: options.simulateTimeoutMs,
       });
 
       reply.header('cache-control', 'no-store');
@@ -180,6 +182,12 @@ export async function transactionRoutes(
         // reason is safe to name: it tells a client which of its own mistakes to fix
         // without revealing anything about this service's state.
         return reply.code(400).send({ error: outcome.reason });
+      }
+
+      if (outcome.status === 'upstream_failed') {
+        return reply
+          .code(outcome.reason === 'timeout' ? 503 : 502)
+          .send({ error: 'upstream_unavailable' });
       }
 
       return reply.send({ data: outcome });

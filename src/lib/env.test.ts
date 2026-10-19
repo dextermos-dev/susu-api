@@ -256,4 +256,24 @@ describe('parseEnv', () => {
     expect(envDev.SUPABASE_URL).toBe('http://localhost:54321');
     expect(envDev.STELLAR_RPC_URL).toBe('http://localhost:8000');
   });
+
+  it('defaults SOROBAN_SIMULATE_TIMEOUT_MS to 10000 and allows custom positive values', () => {
+    const envDefault = parseEnv(validEnv());
+    expect(envDefault.SOROBAN_SIMULATE_TIMEOUT_MS).toBe(10000);
+
+    const envCustom = parseEnv(
+      validEnv({
+        SOROBAN_SIMULATE_TIMEOUT_MS: '5000',
+      }),
+    );
+    expect(envCustom.SOROBAN_SIMULATE_TIMEOUT_MS).toBe(5000);
+
+    expect(() =>
+      parseEnv(
+        validEnv({
+          SOROBAN_SIMULATE_TIMEOUT_MS: '-1',
+        }),
+      ),
+    ).toThrow(/SOROBAN_SIMULATE_TIMEOUT_MS/);
+  });
 });

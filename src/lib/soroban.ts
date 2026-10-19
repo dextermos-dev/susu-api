@@ -35,11 +35,27 @@ export type SorobanSimulator = (
  * over plain HTTP, and refusing that would mean `prepare` could not be exercised
  * against the network it is developed on.
  */
-export function createSorobanSimulator(url: string): SorobanSimulator {
+export type CreateSorobanSimulatorOptions = {
+  readonly timeoutMs?: number;
+  readonly allowHttp?: boolean;
+};
+
+export function createSorobanSimulator(
+  url: string,
+  options?: CreateSorobanSimulatorOptions,
+): SorobanSimulator {
   let server: rpc.Server | undefined;
+  const timeoutMs = options?.timeoutMs;
 
   return async (transaction) => {
-    server ??= new rpc.Server(url, { allowHttp: url.startsWith('http://') });
+    if (!server) {
+      server = new rpc.Server(url, {
+        allowHttp: options?.allowHttp ?? url.startsWith('http://'),
+      });
+      if (timeoutMs !== undefined && timeoutMs > 0 && server.httpClient?.defaults) {
+        server.httpClient.defaults.timeout = timeoutMs;
+      }
+    }
     return await server.simulateTransaction(transaction);
   };
 }
