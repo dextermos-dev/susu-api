@@ -406,25 +406,50 @@ export function createGroupReadModel(db: NodePgDatabase<typeof schema>): GroupRe
       // Aggregated in SQL rather than by folding the contribution list in
       // JavaScript: the sum stays a `numeric` in the database, so no total is
       // ever assembled from values that have already been through a JS number.
+      // Pre-grouped aggregates avoid per-round correlated scalar subqueries (O(C+R)).
       const roundRows = await queryRows(sql`
-        with rounds as (
-          select round from public.contributions where contract_id = ${contractId}
+        with contrib_agg as (
+          select
+            c.round,
+            count(*)::int as contribution_count,
+            coalesce(sum(c.amount), 0)::text as contributed
+          from public.contributions c
+          where c.contract_id = ${contractId}
+          group by c.round
+        ),
+        payout_agg as (
+          select
+            p.round,
+            (array_agg(p.recipient_amount::text order by p.ledger desc, p.event_identity desc))[1] as payout,
+            (array_agg(p.recipient order by p.ledger desc, p.event_identity desc))[1] as recipient
+          from public.payouts p
+          where p.contract_id = ${contractId}
+          group by p.round
+        ),
+        fee_agg as (
+          select
+            f.round,
+            (array_agg(f.fee::text order by f.ledger desc, f.event_identity desc))[1] as fee
+          from public.protocol_fees f
+          where f.contract_id = ${contractId}
+          group by f.round
+        ),
+        rounds as (
+          select round from contrib_agg
           union
-          select round from public.payouts where contract_id = ${contractId}
+          select round from payout_agg
         )
         select
           r.round,
-          (select count(*)::int from public.contributions c
-            where c.contract_id = ${contractId} and c.round = r.round) as contribution_count,
-          (select coalesce(sum(c.amount), 0)::text from public.contributions c
-            where c.contract_id = ${contractId} and c.round = r.round) as contributed,
-          (select p.recipient_amount::text from public.payouts p
-            where p.contract_id = ${contractId} and p.round = r.round) as payout,
-          (select p.recipient from public.payouts p
-            where p.contract_id = ${contractId} and p.round = r.round) as recipient,
-          (select f.fee::text from public.protocol_fees f
-            where f.contract_id = ${contractId} and f.round = r.round) as fee
+          coalesce(c.contribution_count, 0)::int as contribution_count,
+          coalesce(c.contributed, '0') as contributed,
+          p.payout,
+          p.recipient,
+          f.fee
         from rounds r
+        left join contrib_agg c on c.round = r.round
+        left join payout_agg p on p.round = r.round
+        left join fee_agg f on f.round = r.round
         order by r.round
       `);
 

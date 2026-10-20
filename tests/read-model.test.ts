@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle } from 'drizzle-orm/pglite';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -127,6 +129,169 @@ describe('money is cast in SQL, not converted afterwards', () => {
     await expect(createGroupReadModel(db).getGroup(GROUP_CONTRACT_ID)).rejects.toThrow(
       /::text cast/,
     );
+  });
+});
+
+describe('getGroup round aggregation', () => {
+  it('aggregates per-round data using pre-grouped CTEs without correlated scalar subqueries', async () => {
+    const { db, execute } = stubDbSequence([[groupRow()], [], []]);
+    await createGroupReadModel(db).getGroup(GROUP_CONTRACT_ID);
+
+    const roundsSql = rendered(execute.mock.calls[2]?.[0]).replace(/\s+/g, ' ');
+    expect(roundsSql).toContain('with contrib_agg as');
+    expect(roundsSql).toContain('payout_agg as');
+    expect(roundsSql).toContain('fee_agg as');
+    expect(roundsSql).toContain('left join contrib_agg');
+    expect(roundsSql).not.toContain('where c.round = r.round');
+    expect(roundsSql).not.toContain('where p.round = r.round');
+    expect(roundsSql).not.toContain('where f.round = r.round');
+  });
+
+  it('runs against real postgres with no per-round correlated subplans and deterministic degradation', async () => {
+    const pglite = new PGlite();
+    await pglite.exec(`
+      create table public.groups (
+        contract_id text primary key,
+        factory_contract_id text not null,
+        group_id bigint not null,
+        creator text not null,
+        token text not null,
+        contribution_amount numeric(39,0) not null,
+        member_capacity integer not null,
+        created_ledger bigint not null,
+        status text not null default 'open',
+        member_count integer not null default 0,
+        current_round integer not null default 0,
+        completed_rounds integer not null default 0,
+        contributed_total numeric(39,0) not null default 0,
+        paid_out_total numeric(39,0) not null default 0,
+        fee_total numeric(39,0) not null default 0,
+        last_event_ledger bigint not null default 0
+      );
+      create table public.group_members (
+        contract_id text not null,
+        member text not null,
+        position integer not null,
+        joined_ledger bigint not null
+      );
+      create table public.contributions (
+        event_identity text primary key,
+        contract_id text not null,
+        member text not null,
+        round integer not null,
+        amount numeric(39,0) not null,
+        ledger bigint not null,
+        tx_hash text not null
+      );
+      create table public.payouts (
+        event_identity text primary key,
+        contract_id text not null,
+        recipient text not null,
+        round integer not null,
+        recipient_amount numeric(39,0) not null,
+        ledger bigint not null,
+        tx_hash text not null
+      );
+      create table public.protocol_fees (
+        event_identity text primary key,
+        contract_id text not null,
+        treasury text not null,
+        round integer not null,
+        fee numeric(39,0) not null,
+        ledger bigint not null,
+        tx_hash text not null
+      );
+
+      insert into public.groups values (
+        '${GROUP_CONTRACT_ID}', 'CFACTORY', 1, 'GCREATOR', 'CTOKEN',
+        100000000, 3, 100, 'active', 3, 2, 1, 300000000, 95000000, 5000000, 200
+      );
+      insert into public.group_members values
+        ('${GROUP_CONTRACT_ID}', 'GMEMBER1', 1, 101),
+        ('${GROUP_CONTRACT_ID}', 'GMEMBER2', 2, 102),
+        ('${GROUP_CONTRACT_ID}', 'GMEMBER3', 3, 103);
+      insert into public.contributions values
+        ('e1', '${GROUP_CONTRACT_ID}', 'GMEMBER1', 1, 100000000, 110, 'h1'),
+        ('e2', '${GROUP_CONTRACT_ID}', 'GMEMBER2', 1, 100000000, 111, 'h2'),
+        ('e3', '${GROUP_CONTRACT_ID}', 'GMEMBER3', 1, 100000000, 112, 'h3'),
+        ('e4', '${GROUP_CONTRACT_ID}', 'GMEMBER1', 2, 100000000, 120, 'h4');
+      insert into public.payouts values
+        ('p1', '${GROUP_CONTRACT_ID}', 'GMEMBER1', 1, 95000000, 115, 'hp1');
+      insert into public.protocol_fees values
+        ('f1', '${GROUP_CONTRACT_ID}', 'GTREASURY', 1, 5000000, 115, 'hf1');
+    `);
+
+    // Verify EXPLAIN has no SubPlan
+    const explainResult = await pglite.query<{ 'QUERY PLAN': string }>(`
+      explain with contrib_agg as (
+        select
+          c.round,
+          count(*)::int as contribution_count,
+          coalesce(sum(c.amount), 0)::text as contributed
+        from public.contributions c
+        where c.contract_id = '${GROUP_CONTRACT_ID}'
+        group by c.round
+      ),
+      payout_agg as (
+        select
+          p.round,
+          (array_agg(p.recipient_amount::text order by p.ledger desc, p.event_identity desc))[1] as payout,
+          (array_agg(p.recipient order by p.ledger desc, p.event_identity desc))[1] as recipient
+        from public.payouts p
+        where p.contract_id = '${GROUP_CONTRACT_ID}'
+        group by p.round
+      ),
+      fee_agg as (
+        select
+          f.round,
+          (array_agg(f.fee::text order by f.ledger desc, f.event_identity desc))[1] as fee
+        from public.protocol_fees f
+        where f.contract_id = '${GROUP_CONTRACT_ID}'
+        group by f.round
+      ),
+      rounds as (
+        select round from contrib_agg
+        union
+        select round from payout_agg
+      )
+      select
+        r.round,
+        coalesce(c.contribution_count, 0)::int as contribution_count,
+        coalesce(c.contributed, '0') as contributed,
+        p.payout,
+        p.recipient,
+        f.fee
+      from rounds r
+      left join contrib_agg c on c.round = r.round
+      left join payout_agg p on p.round = r.round
+      left join fee_agg f on f.round = r.round
+      order by r.round
+    `);
+    const planText = explainResult.rows.map((r) => Object.values(r)[0]).join('\\n');
+    expect(planText).not.toContain('SubPlan');
+
+    // Run through read model and check results
+    const drizzleDb = drizzle(pglite) as unknown as NodePgDatabase<typeof schema>;
+    const group = await createGroupReadModel(drizzleDb).getGroup(GROUP_CONTRACT_ID);
+    expect(group).toBeDefined();
+    expect(group?.rounds).toHaveLength(2);
+    expect(group?.rounds[0]).toEqual({
+      round: 1,
+      contributionCount: 3,
+      contributed: '300000000',
+      payout: '95000000',
+      recipient: 'GMEMBER1',
+      fee: '5000000',
+    });
+    expect(group?.rounds[1]).toEqual({
+      round: 2,
+      contributionCount: 1,
+      contributed: '100000000',
+      payout: null,
+      recipient: null,
+      fee: null,
+    });
+    await pglite.close();
   });
 });
 
