@@ -1,5 +1,6 @@
 import { buildServer } from './server';
 import { getEnv } from './lib/env';
+import { closeDb } from './db/client';
 
 /**
  * Process entrypoint.
@@ -15,6 +16,7 @@ async function main(): Promise<void> {
     app.log.info({ signal }, 'shutting down');
     try {
       await app.close();
+      await closeDb();
       process.exit(0);
     } catch (error) {
       app.log.error({ err: error }, 'error during shutdown');

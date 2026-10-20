@@ -301,3 +301,37 @@ describe('expired wallet-link nonces', () => {
     }
   });
 });
+
+describe('server shutdown and database lifecycle', () => {
+  it('closes the database pool via onClose hook when app.close() is called', async () => {
+    const { buildServer } = await import('../src/server');
+    const closeDatabase = vi.fn(async () => {});
+
+    const server = await buildServer({
+      probeDatabase: async () => {},
+      closeDatabase,
+    });
+
+    expect(closeDatabase).not.toHaveBeenCalled();
+
+    await server.close();
+
+    expect(closeDatabase).toHaveBeenCalledTimes(1);
+  });
+
+  it('default hook invokes closeDb and ends the pool', async () => {
+    const { buildServer } = await import('../src/server');
+    const { getPool, closeDb } = await import('../src/db/client');
+
+    const pool = getPool();
+    expect(pool.ended).toBe(false);
+
+    const server = await buildServer({ probeDatabase: async () => {} });
+    await server.close();
+
+    expect(pool.ended).toBe(true);
+
+    // Closing again is idempotent and harmless
+    await closeDb();
+  });
+});
