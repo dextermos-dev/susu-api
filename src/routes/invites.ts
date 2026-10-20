@@ -126,6 +126,15 @@ export async function inviteRoutes(
   const { store, isKnownGroup, groupStatus, requireAuth } = options;
   const now = options.now ?? (() => new Date());
 
+  const verifiedUserLimiter = app.createRateLimit({
+    max: 20,
+    timeWindow: '1 minute',
+    keyGenerator: (request: FastifyRequest): string => {
+      const user = request.user;
+      return user ? `user:${user.id}` : `ip:${request.ip}`;
+    },
+  });
+
   /**
    * Claims a use of `code` for the authenticated user.
    *
@@ -193,45 +202,61 @@ export async function inviteRoutes(
     }
   }
 
-  app.post('/groups/:contractId/invites', { preHandler: requireAuth }, async (request, reply) => {
-    const parsedParams = params.safeParse(request.params);
-    if (!parsedParams.success) return invalidRequest(reply, parsedParams.error);
+  app.post(
+    '/groups/:contractId/invites',
+    {
+      preHandler: [
+        requireAuth,
+        async (request: FastifyRequest) => {
+          const check = await verifiedUserLimiter(request);
+          if (!check.isAllowed && check.isExceeded) {
+            const err = new Error('Rate limit exceeded, retry in 1 minute');
+            (err as Error & { statusCode: number }).statusCode = 429;
+            throw err;
+          }
+        },
+      ],
+    },
+    async (request, reply) => {
+      const parsedParams = params.safeParse(request.params);
+      if (!parsedParams.success) return invalidRequest(reply, parsedParams.error);
 
-    const parsedBody = createBody.safeParse(request.body ?? {});
-    if (!parsedBody.success) return invalidRequest(reply, parsedBody.error);
+      const parsedBody = createBody.safeParse(request.body ?? {});
+      if (!parsedBody.success) return invalidRequest(reply, parsedBody.error);
 
-    const { contractId } = parsedParams.data;
-    // Recognised means the index knows it, or the creator registered it after a
-    // confirmation the indexer has not reached yet. Both answer the only question
-    // this gate is asking: is this an address a code may name.
-    if (!(await isKnownGroup(contractId))) return groupNotFound(reply);
+      const { contractId } = parsedParams.data;
+      // Recognised means the index knows it, or the creator registered it after a
+      // confirmation the indexer has not reached yet. Both answer the only question
+      // this gate is asking: is this an address a code may name.
+      if (!(await isKnownGroup(contractId))) return groupNotFound(reply);
 
-    const user = authenticatedUser(request);
-    const ttlHours = parsedBody.data.expiresInHours ?? DEFAULT_INVITE_TTL_HOURS;
-    const expiresAt = new Date(now().getTime() + ttlHours * 60 * 60 * 1000);
+      const user = authenticatedUser(request);
+      const ttlHours = parsedBody.data.expiresInHours ?? DEFAULT_INVITE_TTL_HOURS;
+      const expiresAt = new Date(now().getTime() + ttlHours * 60 * 60 * 1000);
 
-    const invite = await store.create({
-      code: generateInviteCode(),
-      groupContractId: contractId,
-      createdBy: user.id,
-      expiresAt,
-      maxUses: parsedBody.data.maxUses ?? null,
-    });
+      const invite = await store.create({
+        code: generateInviteCode(),
+        groupContractId: contractId,
+        createdBy: user.id,
+        expiresAt,
+        maxUses: parsedBody.data.maxUses ?? null,
+      });
 
-    // The code is returned once, here, and cannot be read back afterwards: the
-    // table has no policy granting a browser role anything, including to its
-    // creator. That is what stops an invite from being enumerated after the fact.
-    reply.header('cache-control', 'no-store');
-    return reply.code(201).send({
-      data: {
-        code: invite.code,
-        groupContractId: invite.groupContractId,
-        expiresAt: invite.expiresAt,
-        maxUses: invite.maxUses,
-        uses: invite.uses,
-      },
-    });
-  });
+      // The code is returned once, here, and cannot be read back afterwards: the
+      // table has no policy granting a browser role anything, including to its
+      // creator. That is what stops an invite from being enumerated after the fact.
+      reply.header('cache-control', 'no-store');
+      return reply.code(201).send({
+        data: {
+          code: invite.code,
+          groupContractId: invite.groupContractId,
+          expiresAt: invite.expiresAt,
+          maxUses: invite.maxUses,
+          uses: invite.uses,
+        },
+      });
+    },
+  );
 
   /**
    * Redemption for a caller holding only the code.

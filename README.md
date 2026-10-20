@@ -296,8 +296,8 @@ claims at once, so the window cannot be held open across many addresses.
 The claim is **not** verified against the chain. Verifying it would mean this service
 decoding Soroban event XDR, and the exposure it would close is a code naming an address
 that turns out not to be a group — which grants nothing, because the contract decides
-who may join. Rate limiting invitation abuse is the proper mitigation and is separate
-work.
+who may join. Rate limiting invitation abuse is the proper mitigation and is enforced
+per-account on invite creation.
 
 ## The read model
 

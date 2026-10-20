@@ -69,7 +69,12 @@ async function harness(
   // The index trailing the chain is the case this covers: `known` is the index's
   // answer, `registered` the creator's unexpired registration.
   const isRegistered = vi.fn(async () => options.registered ?? false);
-  const verify = vi.fn(async () => ({ id: USER_ID, email: 'ada@example.com' }));
+  const verify = vi.fn(async (token: string) => {
+    if (token.startsWith('user-')) {
+      return { id: token, email: `${token}@example.com` };
+    }
+    return { id: USER_ID, email: 'ada@example.com' };
+  });
 
   const app = await buildServer({
     probeDatabase: async () => {},
@@ -284,6 +289,76 @@ describe('POST /api/v1/groups/:contractId/invites', () => {
     });
 
     expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('refuses an authenticated user with 429 when exceeding their invite creation budget', async () => {
+    const { app, store } = await harness();
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        payload: {},
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 20).every((status) => status === 201)).toBe(true);
+    expect(statuses[20]).toBe(429);
+    expect(store.create).toHaveBeenCalledTimes(20);
+  });
+
+  it('refuses an authenticated user exceeding their budget across distinct IP addresses', async () => {
+    const { app, store } = await harness();
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 21; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: AUTH,
+        remoteAddress: `198.51.100.${attempt + 1}`,
+        payload: {},
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 20).every((status) => status === 201)).toBe(true);
+    expect(statuses[20]).toBe(429);
+    expect(store.create).toHaveBeenCalledTimes(20);
+  });
+
+  it('isolates invite creation budgets between distinct authenticated users', async () => {
+    const { app, store } = await harness();
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+        headers: { authorization: 'Bearer user-alice' },
+        payload: {},
+      });
+      expect(response.statusCode).toBe(201);
+    }
+
+    const aliceBlocked = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: { authorization: 'Bearer user-alice' },
+      payload: {},
+    });
+    expect(aliceBlocked.statusCode).toBe(429);
+
+    const bobResponse = await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${GROUP_CONTRACT_ID}/invites`,
+      headers: { authorization: 'Bearer user-bob' },
+      payload: {},
+    });
+    expect(bobResponse.statusCode).toBe(201);
+    expect(store.create).toHaveBeenCalledTimes(21);
   });
 });
 

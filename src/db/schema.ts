@@ -420,7 +420,7 @@ export type NewInviteRedemption = typeof inviteRedemptions.$inferInsert;
  * once. Verifying the claim against the chain instead would mean this service
  * encoding and decoding Soroban XDR, which is a larger and more fragile thing than
  * the gap it would close; the real mitigation for invitation abuse is rate
- * limiting, which is a separate piece of work.
+ * limiting, which is enforced per-account on invite creation.
  */
 export const groupRegistrations = pgTable(
   'group_registrations',
