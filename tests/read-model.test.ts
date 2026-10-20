@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle } from 'drizzle-orm/pglite';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
@@ -127,6 +129,113 @@ describe('money is cast in SQL, not converted afterwards', () => {
     await expect(createGroupReadModel(db).getGroup(GROUP_CONTRACT_ID)).rejects.toThrow(
       /::text cast/,
     );
+  });
+});
+
+describe('duplicate payout and fee row robustness', () => {
+  it('uses array_agg with deterministic ordering for payout, recipient and fee lookups', async () => {
+    const { db, execute } = stubDbSequence([[groupRow()], [], []]);
+    await createGroupReadModel(db).getGroup(GROUP_CONTRACT_ID);
+
+    const roundsSql = rendered(execute.mock.calls[2]?.[0]).replace(/\s+/g, ' ');
+    expect(roundsSql).toContain(
+      'array_agg(p.recipient_amount::text order by p.ledger desc, p.event_identity desc)',
+    );
+    expect(roundsSql).toContain(
+      'array_agg(p.recipient order by p.ledger desc, p.event_identity desc)',
+    );
+    expect(roundsSql).toContain(
+      'array_agg(f.fee::text order by f.ledger desc, f.event_identity desc)',
+    );
+  });
+
+  it('degrades deterministically when multiple payout or fee rows exist for the same round', async () => {
+    const pglite = new PGlite();
+    await pglite.exec(`
+      create table public.groups (
+        contract_id text primary key,
+        factory_contract_id text not null,
+        group_id bigint not null,
+        creator text not null,
+        token text not null,
+        contribution_amount numeric(39,0) not null,
+        member_capacity integer not null,
+        created_ledger bigint not null,
+        status text not null default 'open',
+        member_count integer not null default 0,
+        current_round integer not null default 0,
+        completed_rounds integer not null default 0,
+        contributed_total numeric(39,0) not null default 0,
+        paid_out_total numeric(39,0) not null default 0,
+        fee_total numeric(39,0) not null default 0,
+        last_event_ledger bigint not null default 0
+      );
+      create table public.group_members (
+        contract_id text not null,
+        member text not null,
+        position integer not null,
+        joined_ledger bigint not null
+      );
+      create table public.contributions (
+        event_identity text primary key,
+        contract_id text not null,
+        member text not null,
+        round integer not null,
+        amount numeric(39,0) not null,
+        ledger bigint not null,
+        tx_hash text not null
+      );
+      create table public.payouts (
+        event_identity text primary key,
+        contract_id text not null,
+        recipient text not null,
+        round integer not null,
+        recipient_amount numeric(39,0) not null,
+        ledger bigint not null,
+        tx_hash text not null
+      );
+      create table public.protocol_fees (
+        event_identity text primary key,
+        contract_id text not null,
+        treasury text not null,
+        round integer not null,
+        fee numeric(39,0) not null,
+        ledger bigint not null,
+        tx_hash text not null
+      );
+
+      insert into public.groups values (
+        '${GROUP_CONTRACT_ID}', 'CFACTORY', 1, 'GCREATOR', 'CTOKEN',
+        100000000, 3, 100, 'active', 3, 1, 1, 300000000, 95000000, 5000000, 200
+      );
+      insert into public.group_members values
+        ('${GROUP_CONTRACT_ID}', 'GMEMBER1', 1, 101);
+      insert into public.contributions values
+        ('e1', '${GROUP_CONTRACT_ID}', 'GMEMBER1', 1, 100000000, 110, 'h1');
+      -- Insert TWO payouts for round 1 (simulating ingest retry / re-org)
+      insert into public.payouts values
+        ('p1_older', '${GROUP_CONTRACT_ID}', 'GRECIPIENT_OLD', 1, 90000000, 115, 'hp1'),
+        ('p1_newer', '${GROUP_CONTRACT_ID}', 'GRECIPIENT_NEW', 1, 95000000, 120, 'hp2');
+      -- Insert TWO protocol fees for round 1
+      insert into public.protocol_fees values
+        ('f1_older', '${GROUP_CONTRACT_ID}', 'GTREASURY_OLD', 1, 4000000, 115, 'hf1'),
+        ('f1_newer', '${GROUP_CONTRACT_ID}', 'GTREASURY_NEW', 1, 5000000, 120, 'hf2');
+    `);
+
+    const drizzleDb = drizzle(pglite) as unknown as NodePgDatabase<typeof schema>;
+    const group = await createGroupReadModel(drizzleDb).getGroup(GROUP_CONTRACT_ID);
+    expect(group).toBeDefined();
+    expect(group?.rounds).toHaveLength(1);
+    // Deterministic selection: picks the row with higher ledger / event_identity
+    expect(group?.rounds[0]).toEqual({
+      round: 1,
+      contributionCount: 1,
+      contributed: '100000000',
+      payout: '95000000',
+      recipient: 'GRECIPIENT_NEW',
+      fee: '5000000',
+    });
+    await pglite.close();
   });
 });
 
