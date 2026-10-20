@@ -103,6 +103,7 @@ export type InviteStore = {
   redeem(input: {
     code: string;
     userId: string;
+    expectedGroup?: string;
     shouldClaim?: (groupContractId: string) => Promise<boolean>;
   }): Promise<RedeemOutcome>;
 };
@@ -138,7 +139,7 @@ export function createInviteStore(db: Database): InviteStore {
       return toRecord(row);
     },
 
-    async redeem({ code, userId, shouldClaim }) {
+    async redeem({ code, userId, expectedGroup, shouldClaim }) {
       // The claim decision needs I/O (a group-status read on the shared pool),
       // so it is resolved here, before the transaction opens. Awaiting it while
       // holding the invite row lock would hold the lock across a network round
@@ -157,6 +158,9 @@ export function createInviteStore(db: Database): InviteStore {
         .limit(1);
 
       if (preview === undefined) return { outcome: 'not_found' } as const;
+      if (expectedGroup !== undefined && preview.groupContractId !== expectedGroup) {
+        return { outcome: 'not_found' } as const;
+      }
       if (preview.revokedAt !== null) return { outcome: 'revoked' } as const;
       if (preview.expiresAt !== null && preview.expiresAt.getTime() <= Date.now()) {
         return { outcome: 'expired' } as const;
@@ -194,6 +198,9 @@ export function createInviteStore(db: Database): InviteStore {
 
         const invite = locked[0];
         if (invite === undefined) return { outcome: 'not_found' } as const;
+        if (expectedGroup !== undefined && invite.groupContractId !== expectedGroup) {
+          return { outcome: 'not_found' } as const;
+        }
         if (invite.revokedAt !== null) return { outcome: 'revoked' } as const;
         if (invite.expiresAt !== null && invite.expiresAt.getTime() <= Date.now()) {
           return { outcome: 'expired' } as const;

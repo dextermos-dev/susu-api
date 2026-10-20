@@ -156,6 +156,75 @@ describe('a claim that is withheld', () => {
   });
 });
 
+describe('when the code targets a different group than expected', () => {
+  it('returns not_found and writes nothing to invite_links or invite_redemptions', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: OTHER_CONTRACT_ID,
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+  });
+
+  it('allows a subsequent join to the correct group and spends exactly one use', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    // Mismatched group attempt returns not_found without burning the use
+    const firstOutcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: OTHER_CONTRACT_ID,
+    });
+    expect(firstOutcome).toEqual({ outcome: 'not_found' });
+    expect(await usesOf(invite.id)).toBe(0);
+    expect(await redemptionCount(invite.id)).toBe(0);
+
+    // Subsequent correct group attempt succeeds and spends exactly one use
+    const secondOutcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: GROUP_CONTRACT_ID,
+    });
+    expect(secondOutcome).toMatchObject({
+      outcome: 'redeemed',
+      inviteId: invite.id,
+      groupContractId: GROUP_CONTRACT_ID,
+      claimed: true,
+    });
+    expect(await usesOf(invite.id)).toBe(1);
+    expect(await redemptionCount(invite.id)).toBe(1);
+  });
+
+  it('does not invoke shouldClaim on mismatch', async () => {
+    const invite = await seedInvite(1);
+    const userId = nextUser();
+    await testDb.createUser(userId);
+
+    let consulted = false;
+    const outcome = await store.redeem({
+      code: invite.code,
+      userId,
+      expectedGroup: OTHER_CONTRACT_ID,
+      shouldClaim: async () => {
+        consulted = true;
+        return true;
+      },
+    });
+
+    expect(outcome).toEqual({ outcome: 'not_found' });
+    expect(consulted).toBe(false);
+  });
+});
+
 describe('a claim that is taken', () => {
   it('spends one use and records who spent it', async () => {
     const invite = await seedInvite(3);

@@ -517,6 +517,7 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     expect(store.redeem).toHaveBeenCalledWith({
       code: CODE,
       userId: USER_ID,
+      expectedGroup: GROUP_CONTRACT_ID,
       shouldClaim: expect.any(Function),
     });
   });
@@ -546,6 +547,32 @@ describe('POST /api/v1/groups/:contractId/join', () => {
     // about the code.
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'invite_not_found' });
+    expect(store.redeem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: CODE,
+        userId: USER_ID,
+        expectedGroup: GROUP_CONTRACT_ID,
+      }),
+    );
+  });
+
+  it('forwards expectedGroup to store.redeem on /groups/:contractId/join', async () => {
+    const { app, store } = await harness();
+
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/groups/${OTHER_CONTRACT_ID}/join`,
+      headers: AUTH,
+      payload: { code: CODE },
+    });
+
+    expect(store.redeem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: CODE,
+        userId: USER_ID,
+        expectedGroup: OTHER_CONTRACT_ID,
+      }),
+    );
   });
 
   it('accepts a code whose group matches the path', async () => {

@@ -152,6 +152,7 @@ export async function inviteRoutes(
     const result = await store.redeem({
       code,
       userId: user.id,
+      ...(expectedGroup !== undefined ? { expectedGroup } : {}),
       // A code shared before the group started keeps working after it has, and
       // the chain refuses a join unless the group is still open — so treating
       // "the group has moved on" as a reason to spend a use bills the visitor for
