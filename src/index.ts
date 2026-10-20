@@ -9,7 +9,7 @@ import { getEnv } from './lib/env';
  */
 async function main(): Promise<void> {
   const env = getEnv();
-  const app = await buildServer();
+  const app = await buildServer({ enableNonceReaping: true });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
