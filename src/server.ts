@@ -15,6 +15,7 @@ import { createWalletLinkStore, type WalletLinkStore } from './db/wallet';
 import { createInviteStore, type InviteStore } from './db/invites';
 import { createRegistrationStore, type RegistrationStore } from './db/registrations';
 import { createNotificationReadModel, type NotificationReadModel } from './db/notifications';
+import { createNotificationSweeper, type NotificationSweeper } from './db/notification-sweep';
 import { createTransactionReadModel, type TransactionReadModel } from './db/transactions';
 import { createNonceIssuer, type NonceIssuer } from './lib/nonce';
 import { createSorobanSimulator, type SorobanSimulator } from './lib/soroban';
@@ -52,6 +53,9 @@ export type BuildServerOptions = {
   inviteStore?: InviteStore;
   registrations?: RegistrationStore;
   notificationReadModel?: NotificationReadModel;
+  notificationSweeper?: NotificationSweeper;
+  enableNotificationSweep?: boolean;
+  notificationSweepIntervalMs?: number;
   transactionReadModel?: TransactionReadModel;
   sorobanSimulator?: SorobanSimulator;
   trustProxy?: FastifyServerOptions['trustProxy'];
@@ -271,6 +275,23 @@ export async function buildServer(options: BuildServerOptions = {}): Promise<Fas
     startNonceReaping(walletLinkStore, app.log);
   }
 
+  // Periodic notification sweep fallback when pg_cron is unavailable.
+  // Runs in production or when explicitly enabled, and clears on close.
+  if (
+    options.enableNotificationSweep ||
+    (options.notificationSweeper !== undefined && options.enableNotificationSweep !== false)
+  ) {
+    const sweeper = options.notificationSweeper ?? createNotificationSweeper(getDb());
+    const sweepTimer = startNotificationSweep(
+      sweeper,
+      app.log,
+      options.notificationSweepIntervalMs ?? DEFAULT_NOTIFICATION_SWEEP_INTERVAL_MS,
+    );
+    app.addHook('onClose', async () => {
+      clearInterval(sweepTimer);
+    });
+  }
+
   return app;
 }
 
@@ -309,6 +330,39 @@ export function startNonceReaping(
       })
       .catch((error: unknown) => {
         log.warn({ event: 'nonce_reap_failed', err: error }, 'could not clear expired nonces');
+      });
+  }, intervalMs);
+
+  // Housekeeping must never be the reason the process stays alive.
+  timer.unref();
+
+  return timer;
+}
+
+/** How often notifications are derived when pg_cron is unavailable. */
+export const DEFAULT_NOTIFICATION_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Runs the notification sweeper on a timer.
+ *
+ * Housekeeping fallback for environments without pg_cron. Errors are logged and
+ * retried on the next tick, and unref ensures the process is not kept alive.
+ */
+export function startNotificationSweep(
+  sweeper: Pick<NotificationSweeper, 'sweep'>,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn'>,
+  intervalMs: number = DEFAULT_NOTIFICATION_SWEEP_INTERVAL_MS,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(() => {
+    sweeper
+      .sweep()
+      .then((result) => {
+        if (result.events > 0 || result.written > 0) {
+          log.info({ event: 'notification_sweep', ...result }, 'derived pending notifications');
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn({ event: 'notification_sweep_failed', err: error }, 'notification sweep failed');
       });
   }, intervalMs);
 
