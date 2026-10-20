@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createRegistrationStore,
   MAX_LIVE_REGISTRATIONS,
@@ -215,5 +215,56 @@ describe('createRegistrationStore.register', () => {
       [USER_ONE],
     );
     expect(rows.rows[0]?.['live']).toBe(MAX_LIVE_REGISTRATIONS);
+  });
+});
+
+describe('immunity to host clock skew', () => {
+  it('cannot violate group_registrations_window_positive even when the host clock is hours behind', async () => {
+    vi.useFakeTimers();
+    try {
+      // Skew host clock 2 hours into the past. Under the old code,
+      // Date.now() + 30 min was still 90 minutes behind the database clock,
+      // violating `check (expires_at > created_at)`.
+      vi.setSystemTime(new Date(Date.now() - 2 * 60 * 60 * 1000));
+
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+
+      const rows = await testDb.query(
+        `select
+          (expires_at > created_at) as positive_window,
+          extract(epoch from (expires_at - created_at))::int as window_seconds
+        from public.group_registrations where contract_id = $1`,
+        [GROUP_CONTRACT_ID],
+      );
+
+      expect(rows.rows[0]?.['positive_window']).toBe(true);
+      expect(rows.rows[0]?.['window_seconds']).toBe(REGISTRATION_TTL_MS / 1000);
+      expect(await store.isRegistered(GROUP_CONTRACT_ID)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('window duration is unaffected when the host clock is far in the future', async () => {
+    vi.useFakeTimers();
+    try {
+      // Skew host clock 24 hours into the future
+      vi.setSystemTime(new Date(Date.now() + 24 * 60 * 60 * 1000));
+
+      const result = await store.register({ contractId: GROUP_CONTRACT_ID, userId: USER_ONE });
+      expect(result.outcome).toBe('registered');
+
+      const rows = await testDb.query(
+        `select extract(epoch from (expires_at - created_at))::int as window_seconds
+        from public.group_registrations where contract_id = $1`,
+        [GROUP_CONTRACT_ID],
+      );
+
+      // The window is always derived from the single database clock source: exactly 30 minutes
+      expect(rows.rows[0]?.['window_seconds']).toBe(REGISTRATION_TTL_MS / 1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

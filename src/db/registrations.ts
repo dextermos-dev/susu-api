@@ -123,7 +123,9 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             ),
           );
 
-        const expiresAt = new Date(Date.now() + REGISTRATION_TTL_MS);
+        // Computed strictly from the database clock so clock skew between host
+        // and database can never violate `expires_at > created_at` or warp the window.
+        const sqlExpiresAt = sql`now() + (${REGISTRATION_TTL_MS} * interval '1 millisecond')`;
 
         // The cap is checked against the claim being *replaced*, so re-registering
         // an address an account already holds is never refused for being at the
@@ -139,9 +141,9 @@ export function createRegistrationStore(db: Database): RegistrationStore {
         }
 
         if (alreadyMine) {
-          const updated = await tx
+          const [updated] = await tx
             .update(groupRegistrations)
-            .set({ expiresAt })
+            .set({ expiresAt: sqlExpiresAt })
             .where(
               and(
                 eq(groupRegistrations.contractId, contractId),
@@ -153,40 +155,46 @@ export function createRegistrationStore(db: Database): RegistrationStore {
             )
             .returning({ expiresAt: groupRegistrations.expiresAt });
 
-          return {
-            outcome: 'registered',
-            contractId,
-            expiresAt: (updated[0]?.expiresAt ?? expiresAt).toISOString(),
-          } as const;
+          if (updated !== undefined) {
+            return {
+              outcome: 'registered',
+              contractId,
+              expiresAt: updated.expiresAt.toISOString(),
+            } as const;
+          }
         }
 
         // Another account's claim, or none. `onConflictDoNothing` makes the insert
         // safe either way: if the address is already claimed, nothing changes — the
         // existing holder keeps it and this account learns it is registered.
-        const inserted = await tx
+        const [inserted] = await tx
           .insert(groupRegistrations)
-          .values({ contractId, registeredBy: userId, expiresAt })
+          .values({ contractId, registeredBy: userId, expiresAt: sqlExpiresAt })
           .onConflictDoNothing({ target: groupRegistrations.contractId })
           .returning({ expiresAt: groupRegistrations.expiresAt });
 
-        if (inserted[0] !== undefined) {
+        if (inserted !== undefined) {
           return {
             outcome: 'registered',
             contractId,
-            expiresAt: inserted[0].expiresAt.toISOString(),
+            expiresAt: inserted.expiresAt.toISOString(),
           } as const;
         }
 
-        const holder = await tx
+        const [holder] = await tx
           .select({ expiresAt: groupRegistrations.expiresAt })
           .from(groupRegistrations)
           .where(eq(groupRegistrations.contractId, contractId));
 
-        return {
-          outcome: 'registered',
-          contractId,
-          expiresAt: (holder[0]?.expiresAt ?? expiresAt).toISOString(),
-        } as const;
+        if (holder !== undefined) {
+          return {
+            outcome: 'registered',
+            contractId,
+            expiresAt: holder.expiresAt.toISOString(),
+          } as const;
+        }
+
+        throw new Error('registration could neither be inserted nor found');
       });
     },
 
